@@ -14,7 +14,7 @@ NEPTUNE_PROJECT_NAME = "kananmaham/LLM-Tuning"  # for neptune expriment tracking
 RANDOM_STATE = 42
 # general parameters
 N_SPLITS = 5
-N_TRIALS = 2
+N_TRIALS = 100
 N_SUMMARIZE_ITER = 10
 MAX_N_ITERS_WITHOUT_IMPROVEMENT = 15
 SAMPLE_SIZE = 20000  # sample size to keep of dataset is too large

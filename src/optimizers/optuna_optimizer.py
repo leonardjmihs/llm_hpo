@@ -39,6 +39,7 @@ def optimize_optuna(
         scores = cross_val_score(model, X, y, cv=cv, scoring=metric)
         if scores.mean() < 0:
             scores = -scores
+        print(f"Trial {trial.number}: {params} -> {scores.mean()}")
         return scores.mean()
 
     if sampler is None:

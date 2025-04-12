@@ -7,7 +7,7 @@ from langchain.prompts import (
 )
 from langchain.chains import LLMChain
 # from langchain.memory import ConversationBufferMemory
-from langchain.chains.conversation.memory import ConversationBufferMemory, ConversationSummaryBufferMemory
+from langchain.chains.conversation.memory import ConversationBufferMemory, ConversationSummaryBufferMemory, ConversationBufferWindowMemory
 # from langchain.memory import ConversationSummerBufferWindowMemory
 
 import random
@@ -29,6 +29,17 @@ from optimizers.util import api_rate_limiter
 from langchain_ollama import OllamaLLM
 
 load_dotenv()
+
+import math
+
+def convert_str_list_to_float(str_list):
+    clean_str = str_list.strip("[]").replace("'", "").split(',')
+    if len(clean_str) > 1:
+        digits_before_decimal = int(math.log10(float(clean_str[1]))) + 1 
+        value = float(clean_str[0]) + (float(clean_str[1])/(10**digits_before_decimal))
+    else:
+        value = int(clean_str[0])
+    return value
 
 
 class LLMSampler(BaseSampler):
@@ -125,7 +136,33 @@ class LLMSampler(BaseSampler):
         )
         return LLMChain(llm=self.llm, prompt=prompt, memory=self.memory)
 
-    # @api_rate_limiter()
+    def _decide_on_sampler(self, study, param_name, param_distribution):
+        chain = self._create_chain()
+        param_range = self._get_single_param_range(param_name, param_distribution)
+        best_trial = study.best_trial if study.best_trial else None
+        best_score = best_trial.value if best_trial else None
+        best_params = best_trial.params if best_trial else {}
+        with open(
+            os.path.abspath(
+                "src/configs/prompts/llm_tpe_sample_decide_sampler.txt"
+            ),
+            "r",
+        ) as f:
+            human_input = f.read().format(
+                best_score=best_score,
+                best_params=json.dumps(best_params),
+                param_name=param_name,
+                param_range=json.dumps(param_range),
+            )
+
+        print(f"human input: {human_input}")
+        raw_response = chain.run(human_input=human_input)
+        response = self._parse_llm_response(raw_response)
+        print(response)
+        try:
+            return response['use_optuna']
+        except:
+            return True
     def sample_relative(self, study, trial, search_space):
         if search_space == {}:
             return {}
@@ -134,9 +171,6 @@ class LLMSampler(BaseSampler):
             return self._fallback_sample_relative(search_space)
 
         current_ranges = self._get_param_ranges(search_space)
-
-        print("HERERERERERERERERE optuna_sampler.py line 128 ")
-        # breakpoint()
         if trial.number == 0:
             with open(
                 os.path.abspath(
@@ -158,7 +192,6 @@ class LLMSampler(BaseSampler):
                 ),
                 "r",
             ) as f:
-                breakpoint()
                 human_input = f.read().format(
                     best_score=best_score,
                     best_params=json.dumps(best_params),
@@ -283,13 +316,21 @@ class LLMSampler(BaseSampler):
         pairs = {}
         lines = response.split("\n")
         for line in lines:
-            match = re.match(r'^\s*(["\']?)(\w+)\1\s*:\s*(.+)$', line)
+            # match = re.match(r'^\s*(["\']?)(\w+)\1\s*:\s*(.+)$', line)
+            match = re.match(r'^{?\s*(["\']?)(\w+)\1\s*:\s*(.+)}?$', line)
             if match:
                 key, value = match.group(2), match.group(3)
+                value = str(re.findall(r'\d+', value))
                 try:
                     pairs[key] = json.loads(value)
                 except json.JSONDecodeError:
                     pairs[key] = value.strip()
+        for key, value in pairs.items():
+            if isinstance(value, str) and "[" in value:
+                try:
+                    pairs[key] = convert_str_list_to_float(value)
+                except ValueError:
+                    pass
         return pairs
 
     def _parse_llm_response(self, response: str) -> Dict[str, Any]:
@@ -330,17 +371,17 @@ class LLM_TPE_SAMPLER(BaseSampler):
     def sample_relative(self, study, trial, search_space):
         if trial.number == 0:
             if self.init_method == "llm":
+                print("Trial Number is 0: Using LLM")
                 self.last_called_sampler = "langchain"
                 time.sleep(1.5)
-                print("HERERERERERERERERERE optuna_sampler.py 319")
                 return self.langchain_sampler.sample_relative(
                     study, trial, search_space
                 )
             elif self.init_method == "random":
+                print("Trial Number is 0: Using TPE")
                 params = self.tpe_sampler.sample_relative(study, trial, search_space)
                 self._add_suggestion_to_memory(trial, params, "TPESampler")
                 self.last_called_sampler = "tpe"
-                print("HEREREREREREREREREREREREREERE")
                 return params
             else:
                 raise ValueError(
@@ -352,25 +393,37 @@ class LLM_TPE_SAMPLER(BaseSampler):
             return self.langchain_sampler.sample_relative(study, trial, search_space)
         else:
             params = self.tpe_sampler.sample_relative(study, trial, search_space)
+            print(f"TPE Relative: {params}")
             self._add_suggestion_to_memory(trial, params, "TPESampler")
             self.last_called_sampler = "tpe"
             return params
 
     def sample_independent(self, study, trial, param_name, param_distribution):
-        if self.rng.random() < 0.5 or trial.number == 0:
+        # if self.rng.random() < 0.5 or trial.number == 0:
+        if  trial.number == 0:
             self.last_called_sampler = "langchain"
             time.sleep(1.5)
             return self.langchain_sampler.sample_independent(
                 study, trial, param_name, param_distribution
             )
-
         else:
-            value = self.tpe_sampler.sample_independent(
-                study, trial, param_name, param_distribution
-            )
-            self._add_suggestion_to_memory(trial, {param_name: value}, "TPESampler")
-            self.last_called_sampler = "tpe"
-            return value
+            use_optuna = self.langchain_sampler._decide_on_sampler(study, param_name, param_distribution)
+            # if  trial.number == 0:
+            if  not use_optuna:
+                self.last_called_sampler = "langchain"
+                time.sleep(1.5)
+                return self.langchain_sampler.sample_independent(
+                    study, trial, param_name, param_distribution
+                )
+
+            else:
+                value = self.tpe_sampler.sample_independent(
+                    study, trial, param_name, param_distribution
+                )
+                print(f"TPE indepndent:{param_name}: {value}")
+                self._add_suggestion_to_memory(trial, {param_name: value}, "TPESampler")
+                self.last_called_sampler = "tpe"
+                return value
 
     def _add_suggestion_to_memory(self, trial, params, source):
         human_message = f"{source}, trial {trial.number}"

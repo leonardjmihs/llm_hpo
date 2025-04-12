@@ -1,0 +1,5 @@
+Current best score: {best_score}
+Current best parameters: {best_params}
+Decide if for the next trial we should use the Optuna's TPESampler or if you think you can suggest better parameters based off the previous trials
+Provide JSON format with key and value pair: use_optuna: decision
+where "use_optuna: True" if we should use optuna's tpe sampler, and false if you believe you can suggest better parameters
